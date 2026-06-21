@@ -588,16 +588,25 @@ def cmd_feature(args):
     if not proj:
         return "no project found"
     if args.action == 'list':
-        mode = args.type_or_id or 'applied'
+        mode = args.type_or_id
+        if mode == 'applied':
+            feats = [f for f in proj.features if f.applied]
+            if not feats:
+                print("(no features applied)")
+            for f in feats:
+                print(f"({f.id}: {f.value})")
+            return
         if mode == 'unapplied':
             feats = [f for f in proj.features if not f.applied]
-        else:
-            feats = [f for f in proj.features if f.applied]
-        if not feats:
-            print("(no features applied)" if mode != 'unapplied' else "(no features unapplied)")
+            if not feats:
+                print("(no features unapplied)")
+            for f in feats:
+                print(f"({f.id}: {f.value})")
             return
-        for f in feats:
-            print(f"({f.id}: {f.value})")
+        a = [f for f in proj.features if f.applied]
+        u = [f for f in proj.features if not f.applied]
+        print("A: " + (" ".join(f"({f.id}: {f.value})" for f in a) if a else "(no features applied)"))
+        print("UA: " + (" ".join(f"({f.id}: {f.value})" for f in u) if u else "(no features unapplied)"))
         return
     if args.action == 'add':
         if not args.type_or_id or not args.value:
