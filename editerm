@@ -20,6 +20,17 @@ class Clip:
     start: float
     end: float
 
+@dataclass
+class Feature:
+    id: str
+    type: str
+    value: str
+    applied: bool
+
+FEATURE_CONSTRAINTS = {
+    'pitch': {'min': -12, 'max': 12, 'desc': 'semitones (-12 to +12)'},
+}
+
 PROJECT_DIR = None
 
 def find_project():
@@ -66,6 +77,7 @@ class Project:
         self.clips = []
         self.undo_stack = []
         self.redo_stack = []
+        self.features = []
         self.settings = {
             'fps': 30.0, 'width': 1920, 'height': 1080,
             'format': 'mp4', 'vcodec': 'libx264', 'crf': 23,
@@ -80,6 +92,7 @@ class Project:
             self.clips = [Clip(**c) for c in data.get('clips', [])]
             self.undo_stack = data.get('undo_stack', [])
             self.redo_stack = data.get('redo_stack', [])
+            self.features = [Feature(**f) for f in data.get('features', [])]
             loaded = data.get('settings', {})
             for k in self.settings:
                 if k in loaded:
@@ -92,6 +105,7 @@ class Project:
             'clips': [asdict(c) for c in self.clips],
             'undo_stack': self.undo_stack,
             'redo_stack': self.redo_stack,
+            'features': [asdict(f) for f in self.features],
             'settings': self.settings,
         }
         self.data_file.write_text(json.dumps(data, indent=2))
@@ -509,6 +523,15 @@ def cmd_save(_):
     proj = find_project()
     if not proj:
         return "no project found"
+    unapplied = [f for f in proj.features if not f.applied]
+    if unapplied:
+        try:
+            ans = input(f"Do you want to apply {len(unapplied)} feature(s)? Y/n: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ans = 'y'
+        if ans in ('', 'y', 'yes'):
+            for f in unapplied:
+                f.applied = True
     proj.save()
     print("saved")
 
@@ -531,6 +554,81 @@ def cmd_ls(_):
     for c in proj.clips:
         dur = c.end - c.start
         print(f"  {c.id}  {c.source}  [{format_ts(dur)}]  ({c.start}-{c.end}s)")
+
+def next_feature_id(features, ftype):
+    n = 1
+    while True:
+        fid = f"{ftype}{n}"
+        if not any(f.id == fid for f in features):
+            return fid
+        n += 1
+
+def validate_feature(ftype, raw_val):
+    c = FEATURE_CONSTRAINTS.get(ftype)
+    if not c:
+        return None, f"unknown feature type '{ftype}'"
+    try:
+        v = int(raw_val)
+    except ValueError:
+        return None, f"'{ftype}' requires an integer value"
+    if v < c['min'] or v > c['max']:
+        return None, f"min and max options for {ftype}: {c['min']} | {c['max']}"
+    return str(v), None
+
+def cmd_feature(args):
+    proj = find_project()
+    if not proj:
+        return "no project found"
+    if args.action == 'list':
+        mode = args.type_or_id or 'applied'
+        if mode == 'unapplied':
+            feats = [f for f in proj.features if not f.applied]
+        else:
+            feats = [f for f in proj.features if f.applied]
+        if not feats:
+            print("(no features applied)" if mode != 'unapplied' else "(no features unapplied)")
+            return
+        for f in feats:
+            print(f"({f.id}: {f.value})")
+        return
+    if args.action == 'add':
+        v, err = validate_feature(args.type_or_id, args.value)
+        if err:
+            return err
+        fid = next_feature_id(proj.features, args.type_or_id)
+        proj.features.append(Feature(fid, args.type_or_id, v, False))
+        proj.save()
+        print(f"added {fid} ({v})")
+        return
+    if args.action == 'set':
+        feat = next((f for f in proj.features if f.id == args.type_or_id), None)
+        if not feat:
+            return f"feature '{args.type_or_id}' not found"
+        if feat.applied:
+            return f"'{args.type_or_id}' is applied, unapply it first"
+        v, err = validate_feature(feat.type, args.value)
+        if err:
+            return err
+        feat.value = v
+        proj.save()
+        print(f"set {feat.id} to {v}")
+        return
+    if args.action == 'apply':
+        feat = next((f for f in proj.features if f.id == args.type_or_id), None)
+        if not feat:
+            return f"feature '{args.type_or_id}' not found"
+        feat.applied = True
+        proj.save()
+        print(f"applied {feat.id}")
+        return
+    if args.action == 'unapply':
+        feat = next((f for f in proj.features if f.id == args.type_or_id), None)
+        if not feat:
+            return f"feature '{args.type_or_id}' not found"
+        feat.applied = False
+        proj.save()
+        print(f"unapplied {feat.id}")
+        return
 
 def cmd_settings(proj):
     s = proj.settings
@@ -604,6 +702,10 @@ def main():
     p.add_argument('output')
 
     sub.add_parser('settings')
+    p = sub.add_parser('feature')
+    p.add_argument('action', choices=['add', 'set', 'list', 'apply', 'unapply'])
+    p.add_argument('type_or_id', nargs='?', default=None)
+    p.add_argument('value', nargs='?', default=None)
     sub.add_parser('undo')
     sub.add_parser('redo')
     sub.add_parser('save')
@@ -615,13 +717,6 @@ def main():
         parser.print_help()
         return
 
-    handlers = {
-        'project': cmd_new, 'add': cmd_add, 'separate': cmd_separate,
-        'remove': cmd_remove, 'preview': cmd_preview, 'export': cmd_export,
-        'undo': cmd_undo, 'redo': cmd_redo, 'save': cmd_save,
-        'prompt': cmd_prompt, 'ls': cmd_ls, 'settings': lambda _: None,
-    }
-
     if args.command == 'settings':
         proj = find_project()
         if proj:
@@ -629,6 +724,13 @@ def main():
         else:
             print("no project found")
         return
+
+    handlers = {
+        'project': cmd_new, 'add': cmd_add, 'separate': cmd_separate,
+        'remove': cmd_remove, 'preview': cmd_preview, 'export': cmd_export,
+        'undo': cmd_undo, 'redo': cmd_redo, 'save': cmd_save,
+        'prompt': cmd_prompt, 'ls': cmd_ls, 'feature': cmd_feature,
+    }
 
     r = handlers.get(args.command, lambda _: None)(args)
     if r:
