@@ -303,7 +303,7 @@ def feature_video_filters(project):
         if f.type == 'pixelvideo':
             p = int(f.value)
             factor = max(0.01, 1.0 - p / 100 * 0.95)
-            vf.append(f'scale=iw*{factor}:ih*{factor}:flags=neighbor')
+            vf.append(f'scale=trunc(iw*{factor}/2)*2:trunc(ih*{factor}/2)*2:flags=neighbor')
     return ','.join(vf) if vf else None
 
 def render_preview(project, output_path, use_settings=False):
