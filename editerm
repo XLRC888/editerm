@@ -583,13 +583,6 @@ def validate_feature(ftype, raw_val):
         return None, f"min and max options for {ftype}: {c['min']} | {c['max']}"
     return str(v), None
 
-FEATURE_USAGE = """usage: editerm feature add <type> <value>
-       editerm feature set <id> <value>
-       editerm feature apply|unapply <id>
-       editerm feature list [applied|unapplied]
-
-types: pitch (-12 to +12)"""
-
 def cmd_feature(args):
     proj = find_project()
     if not proj:
@@ -608,7 +601,7 @@ def cmd_feature(args):
         return
     if args.action == 'add':
         if not args.type_or_id or not args.value:
-            return f"usage: editerm feature add <type> <value>\n{FEATURE_USAGE}"
+            return f"usage: editerm feature add <type> <value>\n       editerm feature set <id> <value>\n       editerm feature apply|unapply <id>\n       editerm feature list [applied|unapplied]\n\ntypes: pitch (-12 to +12)"
         v, err = validate_feature(args.type_or_id, args.value)
         if err:
             return err
@@ -619,7 +612,7 @@ def cmd_feature(args):
         return
     if args.action == 'set':
         if not args.type_or_id or not args.value:
-            return f"usage: editerm feature set <id> <value>\n{FEATURE_USAGE}"
+            return f"usage: editerm feature set <id> <value>\n       editerm feature add <type> <value>\n       editerm feature apply|unapply <id>\n       editerm feature list [applied|unapplied]\n\ntypes: pitch (-12 to +12)"
         feat = next((f for f in proj.features if f.id == args.type_or_id), None)
         if not feat:
             return f"feature '{args.type_or_id}' not found"
