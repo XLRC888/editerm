@@ -283,10 +283,23 @@ def render_timeline(project):
     lines.append("=" * total_w)
     return "\n".join(lines)
 
+def feature_audio_filters(project):
+    af = []
+    for f in project.features:
+        if not f.applied:
+            continue
+        if f.type == 'pitch':
+            ratio = 2 ** (int(f.value) / 12)
+            af.append(f'rubberband=pitch={ratio}')
+    return ','.join(af) if af else None
+
 def render_preview(project, output_path, use_settings=False):
     clips = project.clips
     if not clips:
         return "no clips"
+
+    af = feature_audio_filters(project)
+    need_reencode = use_settings or af is not None
 
     td = Path(tempfile.mkdtemp(prefix='editerm_'))
     cf = td / 'concat.txt'
@@ -301,34 +314,29 @@ def render_preview(project, output_path, use_settings=False):
             f.write(f"inpoint {clip.start}\n")
             f.write(f"outpoint {clip.end}\n")
 
-    if use_settings:
-        s = project.settings
+    if not need_reencode:
         cmd = ['ffmpeg', '-y', '-f', 'concat', '-safe', '0',
-               '-i', str(cf),
-               '-c:v', s['vcodec'], '-preset', s['preset'], '-crf', str(s['crf']),
-               '-pix_fmt', s['pix_fmt'], '-r', str(s['fps']),
-               '-vf', f"scale={s['width']}:{s['height']}:force_original_aspect_ratio=decrease,pad={s['width']}:{s['height']}:(ow-iw)/2:(oh-ih)/2",
-               '-c:a', 'aac', '-b:a', '128k',
-               '-f', s['format'], str(output_path)]
+               '-i', str(cf), '-c', 'copy', str(output_path)]
         r = subprocess.run(cmd, capture_output=True, text=True)
-        if r.returncode != 0:
+        if r.returncode == 0:
             shutil.rmtree(td)
-            return f"ffmpeg failed: {r.stderr[:300]}"
-        shutil.rmtree(td)
-        return None
+            return None
 
-    cmd = ['ffmpeg', '-y', '-f', 'concat', '-safe', '0',
-           '-i', str(cf), '-c', 'copy', str(output_path)]
+    s = project.settings if use_settings else {}
+    cmd = ['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', str(cf)]
+    cmd += ['-c:v', s.get('vcodec', 'libx264'), '-preset', s.get('preset', 'fast'),
+            '-crf', str(s.get('crf', 23))]
+    if 'width' in s and 'height' in s and s['width'] and s['height']:
+        cmd += ['-vf', f"scale={s['width']}:{s['height']}:force_original_aspect_ratio=decrease,pad={s['width']}:{s['height']}:(ow-iw)/2:(oh-ih)/2"]
+    if af:
+        cmd += ['-af', af]
+    cmd += ['-c:a', 'aac', '-b:a', '128k', str(output_path)]
+    if s.get('format'):
+        cmd += ['-f', s['format']]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
-        cmd = ['ffmpeg', '-y', '-f', 'concat', '-safe', '0',
-               '-i', str(cf),
-               '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
-               '-c:a', 'aac', '-b:a', '128k', str(output_path)]
-        r = subprocess.run(cmd, capture_output=True, text=True)
-        if r.returncode != 0:
-            shutil.rmtree(td)
-            return f"ffmpeg failed: {r.stderr[:300]}"
+        shutil.rmtree(td)
+        return f"ffmpeg failed: {r.stderr[:300]}"
     shutil.rmtree(td)
     return None
 
