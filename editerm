@@ -583,6 +583,13 @@ def validate_feature(ftype, raw_val):
         return None, f"min and max options for {ftype}: {c['min']} | {c['max']}"
     return str(v), None
 
+FEATURE_USAGE = """usage: editerm feature add <type> <value>
+       editerm feature set <id> <value>
+       editerm feature apply|unapply <id>
+       editerm feature list [applied|unapplied]
+
+types: pitch (-12 to +12)"""
+
 def cmd_feature(args):
     proj = find_project()
     if not proj:
@@ -600,6 +607,8 @@ def cmd_feature(args):
             print(f"({f.id}: {f.value})")
         return
     if args.action == 'add':
+        if not args.type_or_id or not args.value:
+            return f"usage: editerm feature add <type> <value>\n{FEATURE_USAGE}"
         v, err = validate_feature(args.type_or_id, args.value)
         if err:
             return err
@@ -609,6 +618,8 @@ def cmd_feature(args):
         print(f"added {fid} ({v})")
         return
     if args.action == 'set':
+        if not args.type_or_id or not args.value:
+            return f"usage: editerm feature set <id> <value>\n{FEATURE_USAGE}"
         feat = next((f for f in proj.features if f.id == args.type_or_id), None)
         if not feat:
             return f"feature '{args.type_or_id}' not found"
@@ -621,21 +632,15 @@ def cmd_feature(args):
         proj.save()
         print(f"set {feat.id} to {v}")
         return
-    if args.action == 'apply':
+    if args.action in ('apply', 'unapply'):
+        if not args.type_or_id:
+            return f"usage: editerm feature {args.action} <id>"
         feat = next((f for f in proj.features if f.id == args.type_or_id), None)
         if not feat:
             return f"feature '{args.type_or_id}' not found"
-        feat.applied = True
+        feat.applied = (args.action == 'apply')
         proj.save()
-        print(f"applied {feat.id}")
-        return
-    if args.action == 'unapply':
-        feat = next((f for f in proj.features if f.id == args.type_or_id), None)
-        if not feat:
-            return f"feature '{args.type_or_id}' not found"
-        feat.applied = False
-        proj.save()
-        print(f"unapplied {feat.id}")
+        print(f"{args.action}d {feat.id}")
         return
 
 def cmd_settings(proj):
