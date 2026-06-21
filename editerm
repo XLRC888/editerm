@@ -25,7 +25,6 @@ class Feature:
     id: str
     type: str
     value: str
-    applied: bool
 
 FEATURE_CONSTRAINTS = {
     'pitch': {'min': -12, 'max': 12, 'desc': 'semitones (-12 to +12)'},
@@ -94,7 +93,7 @@ class Project:
             self.clips = [Clip(**c) for c in data.get('clips', [])]
             self.undo_stack = data.get('undo_stack', [])
             self.redo_stack = data.get('redo_stack', [])
-            self.features = [Feature(**f) for f in data.get('features', [])]
+            self.features = [Feature(f['id'], f['type'], f['value']) for f in data.get('features', [])]
             loaded = data.get('settings', {})
             for k in self.settings:
                 if k in loaded:
@@ -288,8 +287,6 @@ def render_timeline(project):
 def feature_audio_filters(project):
     af = []
     for f in project.features:
-        if not f.applied:
-            continue
         if f.type == 'pitch':
             ratio = 2 ** (int(f.value) / 12)
             af.append(f'rubberband=pitch={ratio}')
@@ -303,8 +300,6 @@ def feature_audio_filters(project):
 def feature_video_filters(project):
     vf = []
     for f in project.features:
-        if not f.applied:
-            continue
         if f.type == 'pixelvideo':
             p = int(f.value)
             factor = max(0.01, p / 100)
@@ -555,15 +550,6 @@ def cmd_save(_):
     proj = find_project()
     if not proj:
         return "no project found"
-    unapplied = [f for f in proj.features if not f.applied]
-    if unapplied:
-        try:
-            ans = input(f"Do you want to apply {len(unapplied)} feature(s)? Y/n: ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            ans = 'y'
-        if ans in ('', 'y', 'yes'):
-            for f in unapplied:
-                f.applied = True
     proj.save()
     print("saved")
 
@@ -612,75 +598,35 @@ def cmd_feature(args):
     if not proj:
         return "no project found"
     if args.action == 'list':
-        mode = args.type_or_id
-        if mode == 'applied':
-            feats = [f for f in proj.features if f.applied]
-            if not feats:
-                print("(no features applied)")
-            for f in feats:
-                print(f"({f.id}: {f.value})")
+        if not proj.features:
+            print("(no features)")
             return
-        if mode == 'unapplied':
-            feats = [f for f in proj.features if not f.applied]
-            if not feats:
-                print("(no features unapplied)")
-            for f in feats:
-                print(f"({f.id}: {f.value})")
-            return
-        a = [f for f in proj.features if f.applied]
-        u = [f for f in proj.features if not f.applied]
-        print("A: " + (" ".join(f"({f.id}: {f.value})" for f in a) if a else "(no features applied)"))
-        print("UA: " + (" ".join(f"({f.id}: {f.value})" for f in u) if u else "(no features unapplied)"))
+        for f in proj.features:
+            print(f"({f.id}: {f.value})")
         return
     if args.action == 'add':
         if not args.type_or_id or not args.value:
-            return f"usage: editerm feature add <type> <value>\n       editerm feature set <id> <value>\n       editerm feature apply|unapply|remove <id>\n       editerm feature list [applied|unapplied]\n\ntypes: pitch (-12 to +12), pixelsound (1-100), pixelvideo (1-100)"
+            return "usage: editerm feature add <type> <value>\n       editerm feature set <id> <value>\n       editerm feature remove <id>\n       editerm feature list\n\ntypes: pitch (-12 to +12), pixelsound (1-100), pixelvideo (1-100)"
         v, err = validate_feature(args.type_or_id, args.value)
         if err:
             return err
         fid = next_feature_id(proj.features, args.type_or_id)
-        proj.features.append(Feature(fid, args.type_or_id, v, False))
+        proj.features.append(Feature(fid, args.type_or_id, v))
         proj.save()
         print(f"added {fid} ({v})")
         return
     if args.action == 'set':
         if not args.type_or_id or not args.value:
-            return f"usage: editerm feature set <id> <value>\n       editerm feature add <type> <value>\n       editerm feature apply|unapply|remove <id>\n       editerm feature list [applied|unapplied]\n\ntypes: pitch (-12 to +12), pixelsound (1-100), pixelvideo (1-100)"
+            return "usage: editerm feature set <id> <value>\n       editerm feature add <type> <value>\n       editerm feature remove <id>\n       editerm feature list\n\ntypes: pitch (-12 to +12), pixelsound (1-100), pixelvideo (1-100)"
         feat = next((f for f in proj.features if f.id == args.type_or_id), None)
         if not feat:
             return f"feature '{args.type_or_id}' not found"
-        if feat.applied:
-            return f"'{args.type_or_id}' is applied, unapply it first"
         v, err = validate_feature(feat.type, args.value)
         if err:
             return err
         feat.value = v
         proj.save()
         print(f"set {feat.id} to {v}")
-        return
-    if args.action == 'apply':
-        if not args.type_or_id:
-            return "usage: editerm feature apply <id>"
-        feat = next((f for f in proj.features if f.id == args.type_or_id), None)
-        if not feat:
-            return f"feature '{args.type_or_id}' not found"
-        if feat.applied:
-            return f"'{args.type_or_id}' already applied"
-        feat.applied = True
-        proj.save()
-        print(f"applied {feat.id}")
-        return
-    if args.action == 'unapply':
-        if not args.type_or_id:
-            return "usage: editerm feature unapply <id>"
-        feat = next((f for f in proj.features if f.id == args.type_or_id), None)
-        if not feat:
-            return f"feature '{args.type_or_id}' not found"
-        if not feat.applied:
-            return f"'{args.type_or_id}' not applied"
-        feat.applied = False
-        proj.save()
-        print(f"unapplied {feat.id}")
         return
     if args.action == 'remove':
         if not args.type_or_id:
@@ -766,7 +712,7 @@ def main():
 
     sub.add_parser('settings')
     p = sub.add_parser('feature')
-    p.add_argument('action', choices=['add', 'set', 'list', 'apply', 'unapply', 'remove'])
+    p.add_argument('action', choices=['add', 'set', 'list', 'remove'])
     p.add_argument('type_or_id', nargs='?', default=None)
     p.add_argument('value', nargs='?', default=None)
     sub.add_parser('undo')
