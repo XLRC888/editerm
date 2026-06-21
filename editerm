@@ -339,7 +339,8 @@ def render_preview(project, output_path, use_settings=False):
     s = project.settings if use_settings else {}
     cmd = ['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', str(cf)]
     cmd += ['-c:v', s.get('vcodec', 'libx264'), '-preset', s.get('preset', 'fast'),
-            '-crf', str(s.get('crf', 23)), '-pix_fmt', s.get('pix_fmt', 'yuv420p')]
+            '-crf', str(s.get('crf', 23)), '-pix_fmt', s.get('pix_fmt', 'yuv420p'),
+            '-vsync', 'vfr']
     vf_parts = []
     if 'width' in s and 'height' in s and s['width'] and s['height']:
         vf_parts.append(f"scale={s['width']}:{s['height']}:force_original_aspect_ratio=decrease,pad={s['width']}:{s['height']}:(ow-iw)/2:(oh-ih)/2")
