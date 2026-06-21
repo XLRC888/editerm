@@ -1,0 +1,638 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import os
+import select
+import shutil
+import subprocess
+import sys
+import tempfile
+import termios
+import time
+import tty
+from dataclasses import dataclass, asdict
+from pathlib import Path
+
+@dataclass
+class Clip:
+    id: str
+    source: str
+    start: float
+    end: float
+
+PROJECT_DIR = None
+
+def find_project():
+    global PROJECT_DIR
+    cwd = Path.cwd()
+    for p in [cwd] + list(cwd.parents):
+        d = p / '.editerm'
+        if d.exists() and (d / 'project.json').exists():
+            PROJECT_DIR = p
+            return Project(p)
+    return None
+
+def parse_ts(s):
+    parts = s.split(':')
+    if len(parts) == 3:
+        return int(parts[0])*3600 + int(parts[1])*60 + float(parts[2])
+    elif len(parts) == 2:
+        return int(parts[0])*60 + float(parts[1])
+    else:
+        return float(parts[0])
+
+def format_ts(secs):
+    secs = int(round(secs))
+    if secs < 60:
+        return f"{secs}s"
+    elif secs < 3600:
+        return f"{secs//60}m {secs%60:02d}s"
+    else:
+        return f"{secs//3600}h {(secs%3600)//60:02d}m {secs%60:02d}s"
+
+def next_id(clips):
+    n = 1
+    while True:
+        cid = f"cl.{n}"
+        if not any(c.id == cid for c in clips):
+            return cid
+        n += 1
+
+class Project:
+    def __init__(self, path):
+        self.path = Path(path)
+        self.data_file = self.path / '.editerm' / 'project.json'
+        self.name = self.path.name
+        self.clips = []
+        self.undo_stack = []
+        self.redo_stack = []
+        self.settings = {
+            'fps': 30.0, 'width': 1920, 'height': 1080,
+            'format': 'mp4', 'vcodec': 'libx264', 'crf': 23,
+            'pix_fmt': 'yuv420p', 'preset': 'fast',
+        }
+        self.load()
+
+    def load(self):
+        if self.data_file.exists():
+            data = json.loads(self.data_file.read_text())
+            self.name = data.get('name', self.path.name)
+            self.clips = [Clip(**c) for c in data.get('clips', [])]
+            self.undo_stack = data.get('undo_stack', [])
+            self.redo_stack = data.get('redo_stack', [])
+            loaded = data.get('settings', {})
+            for k in self.settings:
+                if k in loaded:
+                    self.settings[k] = loaded[k]
+
+    def save(self):
+        self.data_file.parent.mkdir(parents=True, exist_ok=True)
+        data = {
+            'name': self.name,
+            'clips': [asdict(c) for c in self.clips],
+            'undo_stack': self.undo_stack,
+            'redo_stack': self.redo_stack,
+            'settings': self.settings,
+        }
+        self.data_file.write_text(json.dumps(data, indent=2))
+
+    def push_undo(self):
+        self.undo_stack.append([asdict(c) for c in self.clips])
+        if len(self.undo_stack) > 50:
+            self.undo_stack.pop(0)
+        self.redo_stack.clear()
+
+    def undo(self):
+        if not self.undo_stack:
+            return False
+        state = self.undo_stack.pop()
+        self.redo_stack.append([asdict(c) for c in self.clips])
+        self.clips = [Clip(**c) for c in state]
+        self.save()
+        return True
+
+    def redo(self):
+        if not self.redo_stack:
+            return False
+        state = self.redo_stack.pop()
+        self.undo_stack.append([asdict(c) for c in self.clips])
+        self.clips = [Clip(**c) for c in state]
+        self.save()
+        return True
+
+    def total_duration(self):
+        return sum(c.end - c.start for c in self.clips)
+
+def read_exact(f, n):
+    buf = b''
+    while len(buf) < n:
+        chunk = f.read(n - len(buf))
+        if not chunk:
+            return None
+        buf += chunk
+    return buf
+
+def get_media_info(path):
+    try:
+        r = subprocess.run([
+            'ffprobe', '-v', 'error', '-select_streams', 'v:0',
+            '-show_entries', 'stream=width,height,r_frame_rate',
+            '-of', 'json', str(path)
+        ], capture_output=True, text=True)
+        if r.returncode != 0:
+            return None
+        data = json.loads(r.stdout)
+        if not data.get('streams'):
+            return None
+        s = data['streams'][0]
+        w = int(s['width'])
+        h = int(s['height'])
+        fps_parts = s.get('r_frame_rate', '30/1').split('/')
+        fps = float(fps_parts[0]) / float(fps_parts[1]) if len(fps_parts) == 2 else 30.0
+        return (w, h, fps)
+    except:
+        return None
+
+def resolve_source(project, source):
+    p = Path(source)
+    if p.is_absolute():
+        return p
+    return (project.path / p).resolve()
+
+def get_media_duration(path):
+    try:
+        r = subprocess.run(
+            ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+             '-of', 'default=noprint_wrappers=1:nokey=1', str(path)],
+            capture_output=True, text=True
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            return float(r.stdout.strip())
+    except:
+        pass
+    return None
+
+def render_timeline(project):
+    clips = project.clips
+    if not clips:
+        return "[empty project]"
+
+    tw = shutil.get_terminal_size().columns - 4
+    if tw < 40:
+        tw = 40
+
+    total_dur = project.total_duration()
+    n = len(clips)
+    durs = [c.end - c.start for c in clips]
+
+    avail = tw - n - 1
+    widths = [max(3, round((d / total_dur) * avail)) if total_dur > 0 else 3 for d in durs]
+
+    diff = (tw - n - 1) - sum(widths)
+    if diff > 0:
+        for i in range(len(widths)):
+            if diff <= 0:
+                break
+            widths[i] += 1
+            diff -= 1
+
+    total_w = sum(widths) + n + 1
+
+    lines = []
+    lines.append("=" * total_w)
+
+    dur_label = f"<--{format_ts(total_dur)}-->"
+    lines.append(dur_label.center(total_w))
+
+    src_groups = []
+    i = 0
+    while i < n:
+        src = clips[i].source
+        sw = widths[i]
+        i += 1
+        while i < n and clips[i].source == src:
+            sw += widths[i] + 1
+            i += 1
+        src_groups.append((src, sw))
+
+    src_row = "|"
+    for src, sw in src_groups:
+        name = Path(src).stem
+        if len(name) > sw:
+            name = name[:sw-1] + "~"
+        src_row += (" " + name).ljust(sw) + "|"
+    lines.append(src_row)
+
+    bar = "|"
+    for w in widths:
+        bar += "-" * w + "|"
+    lines.append(bar)
+
+    dur_row = "|"
+    for i in range(n):
+        d = durs[i]
+        s = format_ts(d)
+        if len(s) > widths[i]:
+            s = f"{int(d)}s"
+        dur_row += (" " + s).ljust(widths[i]) + "|"
+    lines.append(dur_row)
+
+    id_row = "|"
+    for i in range(n):
+        id_row += (" " + clips[i].id).ljust(widths[i]) + "|"
+    lines.append(id_row)
+    lines.append(bar)
+
+    markers = [" "] * total_w
+    if total_w >= 2:
+        markers[0] = 'S'
+        markers[1] = 't'
+
+    pos = 0
+    for i in range(n):
+        pos += widths[i] + 1
+        if i == n - 1:
+            if total_w >= 2:
+                markers[total_w - 2] = 'E'
+                markers[total_w - 1] = 'n'
+        elif pos < total_w:
+            if clips[i + 1].source != clips[i].source:
+                if pos + 1 < total_w:
+                    markers[pos] = 'V'
+                    markers[pos + 1] = 'e'
+            else:
+                markers[pos] = 'S'
+
+    marker_str = "".join(markers).rstrip()
+    lines.append(marker_str)
+
+    lines.append("=" * total_w)
+    return "\n".join(lines)
+
+def render_preview(project, output_path, use_settings=False):
+    clips = project.clips
+    if not clips:
+        return "no clips"
+
+    td = Path(tempfile.mkdtemp(prefix='editerm_'))
+    cf = td / 'concat.txt'
+
+    with open(cf, 'w') as f:
+        for clip in clips:
+            src = resolve_source(project, clip.source)
+            if not src.exists():
+                shutil.rmtree(td)
+                return f"source not found: {src}"
+            f.write(f"file '{src}'\n")
+            f.write(f"inpoint {clip.start}\n")
+            f.write(f"outpoint {clip.end}\n")
+
+    if use_settings:
+        s = project.settings
+        cmd = ['ffmpeg', '-y', '-f', 'concat', '-safe', '0',
+               '-i', str(cf),
+               '-c:v', s['vcodec'], '-preset', s['preset'], '-crf', str(s['crf']),
+               '-pix_fmt', s['pix_fmt'], '-r', str(s['fps']),
+               '-vf', f"scale={s['width']}:{s['height']}:force_original_aspect_ratio=decrease,pad={s['width']}:{s['height']}:(ow-iw)/2:(oh-ih)/2",
+               '-c:a', 'aac', '-b:a', '128k',
+               '-f', s['format'], str(output_path)]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            shutil.rmtree(td)
+            return f"ffmpeg failed: {r.stderr[:300]}"
+        shutil.rmtree(td)
+        return None
+
+    cmd = ['ffmpeg', '-y', '-f', 'concat', '-safe', '0',
+           '-i', str(cf), '-c', 'copy', str(output_path)]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        cmd = ['ffmpeg', '-y', '-f', 'concat', '-safe', '0',
+               '-i', str(cf),
+               '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+               '-c:a', 'aac', '-b:a', '128k', str(output_path)]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            shutil.rmtree(td)
+            return f"ffmpeg failed: {r.stderr[:300]}"
+    shutil.rmtree(td)
+    return None
+
+def open_player(path):
+    for player in ['mpv', 'vlc', 'xdg-open']:
+        if shutil.which(player):
+            subprocess.Popen([player, str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return player
+    return None
+
+def cmd_new(args):
+    name = args.name
+    pdir = Path.cwd() / name
+    if pdir.exists():
+        return f"'{name}' already exists"
+    pdir.mkdir(parents=True)
+    (pdir / '.editerm').mkdir()
+    data = {'name': name, 'clips': [], 'undo_stack': [], 'redo_stack': []}
+    (pdir / '.editerm' / 'project.json').write_text(json.dumps(data, indent=2))
+    print(f"created project '{name}' in {pdir}")
+    print(f"  cd {name} && editerm add video <file>")
+
+def cmd_add(args):
+    proj = find_project()
+    if not proj:
+        return "no project found (cd into one or run 'editerm project new <name>')"
+    src = Path(args.path).resolve()
+    if not src.exists():
+        return f"file not found: {src}"
+    dur = get_media_duration(src)
+    if dur is None or dur <= 0:
+        return "could not get duration (ffprobe installed?)"
+    proj.push_undo()
+    try:
+        rel = src.relative_to(proj.path)
+        sstr = str(rel)
+    except ValueError:
+        sstr = str(src)
+    cid = next_id(proj.clips)
+    proj.clips.append(Clip(cid, sstr, 0, dur))
+    proj.save()
+    print(f"added {src.name} as {cid} ({format_ts(dur)})")
+
+def cmd_separate(args):
+    proj = find_project()
+    if not proj:
+        return "no project found"
+    ts = parse_ts(args.timestamp)
+    clip = None
+    if args.clip_id:
+        clip = next((c for c in proj.clips if c.id == args.clip_id), None)
+        if not clip:
+            return f"clip '{args.clip_id}' not found"
+    else:
+        if len(proj.clips) == 0:
+            return "no clips"
+        elif len(proj.clips) == 1:
+            clip = proj.clips[0]
+        else:
+            cands = [c for c in proj.clips if c.start < c.start + ts < c.end]
+            if not cands:
+                return f"no clip contains timestamp {args.timestamp}, specify clip_id"
+            clip = cands[0]
+    split = clip.start + ts
+    if split <= clip.start or split >= clip.end:
+        return f"timestamp at edge of {clip.id}"
+    proj.push_undo()
+    nid = next_id(proj.clips)
+    nc = Clip(nid, clip.source, split, clip.end)
+    clip.end = split
+    idx = proj.clips.index(clip)
+    proj.clips.insert(idx + 1, nc)
+    proj.save()
+    print(f"split {clip.id} -> {clip.id} + {nid} at {args.timestamp}")
+
+def cmd_remove(args):
+    proj = find_project()
+    if not proj:
+        return "no project found"
+    clip = next((c for c in proj.clips if c.id == args.clip_id), None)
+    if not clip:
+        return f"clip '{args.clip_id}' not found"
+    ts = parse_ts(args.start)
+    te = parse_ts(args.end)
+    if ts >= te:
+        return "start >= end"
+    rs = clip.start + ts
+    re = clip.start + te
+    if rs <= clip.start and re >= clip.end:
+        proj.push_undo()
+        proj.clips.remove(clip)
+        proj.save()
+        print(f"removed {clip.id}")
+        return
+    if rs <= clip.start:
+        proj.push_undo()
+        clip.start = re
+        proj.save()
+        print(f"trimmed start of {clip.id}")
+        return
+    if re >= clip.end:
+        proj.push_undo()
+        clip.end = rs
+        proj.save()
+        print(f"trimmed end of {clip.id}")
+        return
+    proj.push_undo()
+    nid = next_id(proj.clips)
+    nc = Clip(nid, clip.source, re, clip.end)
+    clip.end = rs
+    idx = proj.clips.index(clip)
+    proj.clips.insert(idx + 1, nc)
+    proj.save()
+    print(f"split {clip.id} -> {clip.id} + {nid} (removed {args.start}-{args.end})")
+
+def cmd_preview_ascii(proj):
+    if not shutil.which('mpv'):
+        return "mpv not found (install mpv for ascii preview)"
+    if not proj.clips:
+        return "no clips"
+    td = Path(tempfile.mkdtemp(prefix='editerm_'))
+    tmp_vid = td / 'preview.mp4'
+    err = render_preview(proj, tmp_vid)
+    if err:
+        shutil.rmtree(td)
+        return err
+    if not tmp_vid.exists() or tmp_vid.stat().st_size == 0:
+        shutil.rmtree(td)
+        return "preview render failed"
+    try:
+        subprocess.run(['mpv', '--vo=tct', '--video-align-y=-1', '--really-quiet', str(tmp_vid)])
+    except KeyboardInterrupt:
+        pass
+    shutil.rmtree(td)
+
+def cmd_preview(args):
+    proj = find_project()
+    if not proj:
+        return "no project found"
+    if args.mode == 'ascii':
+        if not proj.clips:
+            return "no clips"
+        cmd_preview_ascii(proj)
+    elif args.mode == 'timeline':
+        print(render_timeline(proj))
+    elif args.mode == 'video':
+        if not proj.clips:
+            return "no clips to preview"
+        out = Path(f"/tmp/editerm/{proj.name}_preview.mp4")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        err = render_preview(proj, out)
+        if err:
+            return err
+        if out.exists() and out.stat().st_size > 0:
+            p = open_player(out)
+            if not p:
+                return "no player found (install mpv/vlc)"
+        else:
+            return "preview file empty"
+
+def cmd_export(args):
+    proj = find_project()
+    if not proj:
+        return "no project found"
+    out = Path(args.output)
+    if not out.is_absolute():
+        out = proj.path / out
+    if out.exists():
+        return f"'{out}' exists"
+    if not proj.clips:
+        return "no clips"
+    print(f"rendering to {out}...")
+    err = render_preview(proj, out, use_settings=True)
+    if err:
+        return err
+    size = out.stat().st_size
+    print(f"exported ({size / 1024 / 1024:.1f} MB)")
+
+def cmd_undo(_):
+    proj = find_project()
+    if not proj:
+        return "no project found"
+    print("undone" if proj.undo() else "nothing to undo")
+
+def cmd_redo(_):
+    proj = find_project()
+    if not proj:
+        return "no project found"
+    print("redone" if proj.redo() else "nothing to redo")
+
+def cmd_save(_):
+    proj = find_project()
+    if not proj:
+        return "no project found"
+    proj.save()
+    print("saved")
+
+def cmd_prompt(_):
+    proj = find_project()
+    if not proj:
+        return ""
+    s = proj.name
+    if len(s) > 30:
+        s = s[:29] + "~"
+    return f"({s})"
+
+def cmd_ls(_):
+    proj = find_project()
+    if not proj:
+        return "no project found"
+    if not proj.clips:
+        print("no clips")
+        return
+    for c in proj.clips:
+        dur = c.end - c.start
+        print(f"  {c.id}  {c.source}  [{format_ts(dur)}]  ({c.start}-{c.end}s)")
+
+def cmd_settings(proj):
+    s = proj.settings
+    labels = [
+        ('fps', f"FPS"),
+        ('width', "Width"),
+        ('height', "Height"),
+        ('format', "Format"),
+        ('vcodec', "Video codec"),
+        ('crf', "CRF (0-51)"),
+        ('pix_fmt', "Pixel format"),
+        ('preset', "Preset"),
+    ]
+    while True:
+        print(f"\nsettings for {proj.name}")
+        print("-" * 30)
+        for i, (k, label) in enumerate(labels, 1):
+            print(f"  {i}. {label}: {s[k]}")
+        print("  q. quit (save)")
+        try:
+            inp = input("> ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        if inp == 'q':
+            break
+        try:
+            idx = int(inp) - 1
+        except ValueError:
+            continue
+        if idx < 0 or idx >= len(labels):
+            continue
+        k, _ = labels[idx]
+        raw = input(f"  {k} [{s[k]}]: ").strip()
+        if not raw:
+            continue
+        orig = type(s[k])
+        try:
+            s[k] = orig(raw) if orig != str else raw
+        except ValueError:
+            continue
+        proj.save()
+    proj.save()
+
+def main():
+    parser = argparse.ArgumentParser(prog='editerm', description='terminal video editor')
+    sub = parser.add_subparsers(dest='command')
+
+    p = sub.add_parser('project')
+    p.add_argument('action', choices=['new'])
+    p.add_argument('name')
+
+    p = sub.add_parser('add')
+    p.add_argument('type', choices=['video'])
+    p.add_argument('path')
+
+    p = sub.add_parser('separate')
+    p.add_argument('clip_id', nargs='?', default=None)
+    p.add_argument('timestamp')
+
+    p = sub.add_parser('remove')
+    p.add_argument('start')
+    p.add_argument('end')
+    p.add_argument('clip_id')
+
+    p = sub.add_parser('preview')
+    p.add_argument('mode', choices=['timeline', 'video', 'ascii'])
+
+    p = sub.add_parser('export')
+    p.add_argument('type', choices=['video'])
+    p.add_argument('output')
+
+    sub.add_parser('settings')
+    sub.add_parser('undo')
+    sub.add_parser('redo')
+    sub.add_parser('save')
+    sub.add_parser('prompt')
+    sub.add_parser('ls')
+
+    args = parser.parse_args()
+    if not args.command:
+        parser.print_help()
+        return
+
+    handlers = {
+        'project': cmd_new, 'add': cmd_add, 'separate': cmd_separate,
+        'remove': cmd_remove, 'preview': cmd_preview, 'export': cmd_export,
+        'undo': cmd_undo, 'redo': cmd_redo, 'save': cmd_save,
+        'prompt': cmd_prompt, 'ls': cmd_ls, 'settings': lambda _: None,
+    }
+
+    if args.command == 'settings':
+        proj = find_project()
+        if proj:
+            cmd_settings(proj)
+        else:
+            print("no project found")
+        return
+
+    r = handlers.get(args.command, lambda _: None)(args)
+    if r:
+        print(r)
+
+if __name__ == '__main__':
+    main()
