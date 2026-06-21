@@ -354,8 +354,10 @@ def render_preview(project, output_path, use_settings=False):
         cmd += ['-f', s['format']]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
+        err = r.stderr[:300]
+        print("ffmpeg error:", err, file=sys.stderr)
         shutil.rmtree(td)
-        return f"ffmpeg failed: {r.stderr[:300]}"
+        return f"ffmpeg failed: {err}"
     shutil.rmtree(td)
     return None
 
