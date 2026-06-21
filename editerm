@@ -610,7 +610,7 @@ def cmd_feature(args):
         return
     if args.action == 'add':
         if not args.type_or_id or not args.value:
-            return f"usage: editerm feature add <type> <value>\n       editerm feature set <id> <value>\n       editerm feature apply|unapply <id>\n       editerm feature list [applied|unapplied]\n\ntypes: pitch (-12 to +12)"
+            return f"usage: editerm feature add <type> <value>\n       editerm feature set <id> <value>\n       editerm feature apply|unapply|remove <id>\n       editerm feature list [applied|unapplied]\n\ntypes: pitch (-12 to +12)"
         v, err = validate_feature(args.type_or_id, args.value)
         if err:
             return err
@@ -621,7 +621,7 @@ def cmd_feature(args):
         return
     if args.action == 'set':
         if not args.type_or_id or not args.value:
-            return f"usage: editerm feature set <id> <value>\n       editerm feature add <type> <value>\n       editerm feature apply|unapply <id>\n       editerm feature list [applied|unapplied]\n\ntypes: pitch (-12 to +12)"
+            return f"usage: editerm feature set <id> <value>\n       editerm feature add <type> <value>\n       editerm feature apply|unapply|remove <id>\n       editerm feature list [applied|unapplied]\n\ntypes: pitch (-12 to +12)"
         feat = next((f for f in proj.features if f.id == args.type_or_id), None)
         if not feat:
             return f"feature '{args.type_or_id}' not found"
@@ -634,15 +634,39 @@ def cmd_feature(args):
         proj.save()
         print(f"set {feat.id} to {v}")
         return
-    if args.action in ('apply', 'unapply'):
+    if args.action == 'apply':
         if not args.type_or_id:
-            return f"usage: editerm feature {args.action} <id>"
+            return "usage: editerm feature apply <id>"
         feat = next((f for f in proj.features if f.id == args.type_or_id), None)
         if not feat:
             return f"feature '{args.type_or_id}' not found"
-        feat.applied = (args.action == 'apply')
+        if feat.applied:
+            return f"'{args.type_or_id}' already applied"
+        feat.applied = True
         proj.save()
-        print(f"{args.action}d {feat.id}")
+        print(f"applied {feat.id}")
+        return
+    if args.action == 'unapply':
+        if not args.type_or_id:
+            return "usage: editerm feature unapply <id>"
+        feat = next((f for f in proj.features if f.id == args.type_or_id), None)
+        if not feat:
+            return f"feature '{args.type_or_id}' not found"
+        if not feat.applied:
+            return f"'{args.type_or_id}' not applied"
+        feat.applied = False
+        proj.save()
+        print(f"unapplied {feat.id}")
+        return
+    if args.action == 'remove':
+        if not args.type_or_id:
+            return "usage: editerm feature remove <id>"
+        feat = next((f for f in proj.features if f.id == args.type_or_id), None)
+        if not feat:
+            return f"feature '{args.type_or_id}' not found"
+        proj.features.remove(feat)
+        proj.save()
+        print(f"removed {feat.id}")
         return
 
 def cmd_settings(proj):
@@ -718,7 +742,7 @@ def main():
 
     sub.add_parser('settings')
     p = sub.add_parser('feature')
-    p.add_argument('action', choices=['add', 'set', 'list', 'apply', 'unapply'])
+    p.add_argument('action', choices=['add', 'set', 'list', 'apply', 'unapply', 'remove'])
     p.add_argument('type_or_id', nargs='?', default=None)
     p.add_argument('value', nargs='?', default=None)
     sub.add_parser('undo')
