@@ -306,6 +306,16 @@ def feature_video_filters(project):
             vf.append(f'scale=trunc(iw*{factor}/2)*2:trunc(ih*{factor}/2)*2:flags=neighbor')
     return ','.join(vf) if vf else None
 
+def get_media_resolution(path):
+    r = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+        '-show_entries', 'stream=width,height', '-of', 'csv=s=,:p=0', str(path)],
+        capture_output=True, text=True)
+    parts = r.stdout.strip().split(',')
+    if len(parts) == 2:
+        try: return int(parts[0]), int(parts[1])
+        except: pass
+    return None, None
+
 def render_preview(project, output_path, use_settings=False):
     clips = project.clips
     if not clips:
@@ -328,6 +338,8 @@ def render_preview(project, output_path, use_settings=False):
             f.write(f"inpoint {clip.start}\n")
             f.write(f"outpoint {clip.end}\n")
 
+    s = project.settings if use_settings else {}
+
     if not need_reencode:
         cmd = ['ffmpeg', '-y', '-f', 'concat', '-safe', '0',
                '-i', str(cf), '-c', 'copy', str(output_path)]
@@ -336,20 +348,44 @@ def render_preview(project, output_path, use_settings=False):
             shutil.rmtree(td)
             return None
 
-    s = project.settings if use_settings else {}
-    cmd = ['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', str(cf)]
-    cmd += ['-c:v', s.get('vcodec', 'libx264'), '-preset', s.get('preset', 'fast'),
-            '-crf', str(s.get('crf', 23)), '-pix_fmt', s.get('pix_fmt', 'yuv420p'),
-            '-vsync', 'vfr']
-    vf_parts = []
+    src0 = resolve_source(project, clips[0].source)
     if 'width' in s and 'height' in s and s['width'] and s['height']:
-        vf_parts.append(f"scale={s['width']}:{s['height']}:force_original_aspect_ratio=decrease,pad={s['width']}:{s['height']}:(ow-iw)/2:(oh-ih)/2")
+        tgt_w, tgt_h = s['width'], s['height']
+    else:
+        tgt_w, tgt_h = get_media_resolution(src0)
+        if not tgt_w:
+            shutil.rmtree(td)
+            return "could not determine resolution"
+
+    inputs, norm_fc = [], []
+    for i, clip in enumerate(clips):
+        src = resolve_source(project, clip.source)
+        if not src.exists():
+            shutil.rmtree(td)
+            return f"source not found: {src}"
+        inputs += ['-ss', str(clip.start), '-to', str(clip.end), '-i', str(src)]
+        norm_fc.append(
+            f'[{i}:v]scale={tgt_w}:{tgt_h}:force_original_aspect_ratio=decrease,'
+            f'pad={tgt_w}:{tgt_h}:(ow-iw)/2:(oh-ih)/2,setsar=1[vi{i}];'
+            f'[{i}:a]aresample=44100[ai{i}]'
+        )
+
+    concat_ins = ''.join(f'[vi{i}][ai{i}]' for i in range(len(clips)))
+    concat_flt = f'{concat_ins}concat=n={len(clips)}:v=1:a=1[rawv][rawa]'
+    fc_parts = norm_fc + [concat_flt]
+
+    vmap, amap = '[rawv]', '[rawa]'
     if vf:
-        vf_parts.append(vf)
-    if vf_parts:
-        cmd += ['-vf', ','.join(vf_parts)]
+        fc_parts.append(f'{vmap}{vf}[outv]')
+        vmap = '[outv]'
     if af:
-        cmd += ['-af', af]
+        fc_parts.append(f'{amap}{af}[outa]')
+        amap = '[outa]'
+
+    cmd = ['ffmpeg', '-y'] + inputs
+    cmd += ['-filter_complex', ';'.join(fc_parts), '-map', vmap, '-map', amap]
+    cmd += ['-c:v', s.get('vcodec', 'libx264'), '-preset', s.get('preset', 'fast'),
+            '-crf', str(s.get('crf', 23)), '-pix_fmt', s.get('pix_fmt', 'yuv420p')]
     cmd += ['-c:a', 'aac', '-b:a', '128k', str(output_path)]
     if s.get('format'):
         cmd += ['-f', s['format']]
