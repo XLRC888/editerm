@@ -1,0 +1,116 @@
+#compdef editerm
+
+_editerm_find_proj_json() {
+  local dir=$PWD
+  while [[ $dir != / ]]; do
+    local f=$dir/.editerm/project.json
+    [[ -f $f ]] && { echo $f; return 0 }
+    dir=${dir:h}
+  done
+  return 1
+}
+
+_editerm_get_features() {
+  local jf=$(_editerm_find_proj_json)
+  [[ -z $jf ]] && return
+  python3 -c "
+import json
+with open('$jf') as f:
+    d = json.load(f)
+for f in d.get('features', []):
+    print(f['id'])
+" 2>/dev/null
+}
+
+_editerm_get_clips() {
+  local jf=$(_editerm_find_proj_json)
+  [[ -z $jf ]] && return
+  python3 -c "
+import json
+with open('$jf') as f:
+    d = json.load(f)
+for c in d.get('clips', []):
+    print(c['id'])
+" 2>/dev/null
+}
+
+_editerm() {
+  local curcontext="$curcontext" state state_descr line
+  typeset -A opt_args
+
+  if (( CURRENT == 2 )); then
+    _values 'command' \
+      'project[create or manage projects]' \
+      'add[add a video clip]' \
+      'separate[split a clip at timestamp]' \
+      'remove[remove a clip]' \
+      'preview[preview modes]' \
+      'export[render to file]' \
+      'undo[undo last change]' \
+      'redo[redo last undone change]' \
+      'save[save project]' \
+      'ls[list clips]' \
+      'prompt[print shell prompt]' \
+      'settings[configure project settings]' \
+      'feature[manage features]'
+    return
+  fi
+
+  case "$words[2]" in
+    project)
+      if (( CURRENT == 3 )); then
+        _values 'subcommand' 'new[create a new project]'
+      fi
+      ;;
+    add)
+      _files -g '*.mp4 *.mkv *.avi *.mov *.webm *.m4v *(-.)'
+      ;;
+    separate)
+      _message 'timestamp (HH:MM:SS.mmm or seconds)'
+      ;;
+    remove)
+      local clips=($(_editerm_get_clips))
+      if (( $#clips )); then
+        _values 'clip' $clips
+      fi
+      ;;
+    preview)
+      if (( CURRENT == 3 )); then
+        _values 'mode' 'timeline[show timeline]' 'video[open video preview]' 'ascii[open ascii art preview]'
+      fi
+      ;;
+    export)
+      _files -g '*.mp4 *.mkv *.avi *.mov *.webm *(-.)'
+      ;;
+    feature)
+      if (( CURRENT == 3 )); then
+        _values 'action' \
+          'add[add a feature]' \
+          'set[modify a feature value]' \
+          'list[list all features]' \
+          'remove[remove a feature]'
+      elif (( CURRENT == 4 )); then
+        case "$words[3]" in
+          add)
+            _values 'type' \
+              'pitch[audio pitch shift]' \
+              'pixelsound[audio pixelation/lo-fi]' \
+              'pixelvideo[video pixelation]'
+            ;;
+          set|remove)
+            local feats=($(_editerm_get_features))
+            if (( $#feats )); then
+              _values 'feature' $feats
+            fi
+            ;;
+        esac
+      elif (( CURRENT == 5 )) && [[ "$words[3]" == "add" ]]; then
+        _message 'value (1-100, or -12 to 12 for pitch)'
+      fi
+      ;;
+    undo|redo|save|ls|prompt|settings)
+      ;;
+  esac
+}
+
+_editerm "$@"
