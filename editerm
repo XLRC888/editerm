@@ -292,8 +292,8 @@ def feature_audio_filters(project):
             af.append(f'rubberband=pitch={ratio}')
         if f.type == 'pixelsound':
             p = int(f.value)
-            rate = max(200, int(44100 * p / 100))
-            bits = max(1, p // 4)
+            rate = max(200, 44100 - int(p / 100 * 43900))
+            bits = max(1, 24 - int(p / 100 * 23))
             af.append(f'acrusher=bits={bits},aresample={rate}')
     return ','.join(af) if af else None
 
@@ -302,7 +302,7 @@ def feature_video_filters(project):
     for f in project.features:
         if f.type == 'pixelvideo':
             p = int(f.value)
-            factor = max(0.01, p / 100)
+            factor = max(0.01, 1.0 - p / 100 * 0.95)
             vf.append(f'scale=iw*{factor}:ih*{factor}:flags=neighbor')
     return ','.join(vf) if vf else None
 
