@@ -323,7 +323,12 @@ def render_preview(project, output_path, use_settings=False):
 
     af = feature_audio_filters(project)
     vf = feature_video_filters(project)
-    need_reencode = use_settings or af is not None or vf is not None
+    srcs = set()
+    for c in clips:
+        src = resolve_source(project, c.source)
+        if src.exists(): srcs.add(src.resolve())
+    multi_source = len(srcs) > 1
+    need_reencode = use_settings or af is not None or vf is not None or multi_source
 
     td = Path(tempfile.mkdtemp(prefix='editerm_'))
     cf = td / 'concat.txt'
