@@ -41,7 +41,7 @@ _editerm() {
   if (( CURRENT == 2 )); then
     _values 'command' \
       'project[create or manage projects]' \
-      'add[add a video clip]' \
+      'add[add media to the project]' \
       'separate[split a clip at timestamp]' \
       'remove[remove a clip]' \
       'preview[preview modes]' \
@@ -63,7 +63,15 @@ _editerm() {
       fi
       ;;
     add)
-      _files -g '*.mp4 *.mkv *.avi *.mov *.webm *.m4v *(-.)'
+      if (( CURRENT == 3 )); then
+        _values 'type' 'video[add a video clip]' 'sound[add an audio clip]' 'photo[add a photo clip]'
+      elif (( CURRENT == 4 )); then
+        case "$words[3]" in
+          video) _files -g '*.mp4 *.mkv *.avi *.mov *.webm *.m4v *(-.)' ;;
+          sound) _files -g '*.mp3 *.wav *.flac *.ogg *.aac *.m4a *.wma *(-.)' ;;
+          photo) _files -g '*.jpg *.jpeg *.png *.gif *.bmp *.webp *(-.)' ;;
+        esac
+      fi
       ;;
     separate)
       _message 'timestamp (HH:MM:SS.mmm or seconds)'

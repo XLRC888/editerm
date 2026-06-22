@@ -19,6 +19,7 @@ class Clip:
     source: str
     start: float
     end: float
+    kind: str = 'video'
 
 @dataclass
 class Feature:
@@ -368,12 +369,27 @@ def render_preview(project, output_path, use_settings=False):
         if not src.exists():
             shutil.rmtree(td)
             return f"source not found: {src}"
-        inputs += ['-ss', str(clip.start), '-to', str(clip.end), '-i', str(src)]
-        norm_fc.append(
-            f'[{i}:v]scale={tgt_w}:{tgt_h}:force_original_aspect_ratio=decrease,'
-            f'pad={tgt_w}:{tgt_h}:(ow-iw)/2:(oh-ih)/2,setsar=1[vi{i}];'
-            f'[{i}:a]aresample=44100[ai{i}]'
-        )
+        dur = clip.end - clip.start
+        if clip.kind == 'photo':
+            inputs += ['-loop', '1', '-t', str(dur), '-i', str(src)]
+            norm_fc.append(
+                f'[{i}:v]scale={tgt_w}:{tgt_h}:force_original_aspect_ratio=decrease,'
+                f'pad={tgt_w}:{tgt_h}:(ow-iw)/2:(oh-ih)/2,setsar=1[vi{i}];'
+                f'anullsrc=r=44100:cl=stereo:d={dur}[ai{i}]'
+            )
+        elif clip.kind == 'sound':
+            inputs += ['-ss', str(clip.start), '-to', str(clip.end), '-i', str(src)]
+            norm_fc.append(
+                f'color=c=black:s={tgt_w}x{tgt_h}:d={dur}:r=30,setsar=1[vi{i}];'
+                f'[{i}:a]aresample=44100[ai{i}]'
+            )
+        else:
+            inputs += ['-ss', str(clip.start), '-to', str(clip.end), '-i', str(src)]
+            norm_fc.append(
+                f'[{i}:v]scale={tgt_w}:{tgt_h}:force_original_aspect_ratio=decrease,'
+                f'pad={tgt_w}:{tgt_h}:(ow-iw)/2:(oh-ih)/2,setsar=1[vi{i}];'
+                f'[{i}:a]aresample=44100[ai{i}]'
+            )
 
     concat_ins = ''.join(f'[vi{i}][ai{i}]' for i in range(len(clips)))
     concat_flt = f'{concat_ins}concat=n={len(clips)}:v=1:a=1[rawv][rawa]'
@@ -420,7 +436,7 @@ def cmd_new(args):
     data = {'name': name, 'clips': [], 'undo_stack': [], 'redo_stack': []}
     (pdir / '.editerm' / 'project.json').write_text(json.dumps(data, indent=2))
     print(f"created project '{name}' in {pdir}")
-    print(f"  cd {name} && editerm add video <file>")
+    print(f"  cd {name} && editerm add video|sound|photo <file>")
 
 def cmd_add(args):
     proj = find_project()
@@ -429,9 +445,12 @@ def cmd_add(args):
     src = Path(args.path).resolve()
     if not src.exists():
         return f"file not found: {src}"
-    dur = get_media_duration(src)
-    if dur is None or dur <= 0:
-        return "could not get duration (ffprobe installed?)"
+    if args.type in ('video', 'sound'):
+        dur = get_media_duration(src)
+        if dur is None or dur <= 0:
+            return "could not get duration (ffprobe installed?)"
+    else:
+        dur = 5.0
     proj.push_undo()
     try:
         rel = src.relative_to(proj.path)
@@ -439,7 +458,7 @@ def cmd_add(args):
     except ValueError:
         sstr = str(src)
     cid = next_id(proj.clips)
-    proj.clips.append(Clip(cid, sstr, 0, dur))
+    proj.clips.append(Clip(cid, sstr, 0, dur, kind=args.type))
     proj.save()
     print(f"added {src.name} as {cid} ({format_ts(dur)})")
 
@@ -735,7 +754,7 @@ def main():
     p.add_argument('name')
 
     p = sub.add_parser('add')
-    p.add_argument('type', choices=['video'])
+    p.add_argument('type', choices=['video', 'sound', 'photo'])
     p.add_argument('path')
 
     p = sub.add_parser('separate')
